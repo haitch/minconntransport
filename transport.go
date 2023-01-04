@@ -19,6 +19,9 @@ func NewFromHttpTransport(minConnPerHost int32, inner *http.Transport) http.Roun
 	// disable connection pooling from http package
 	innerTP.MaxConnsPerHost = 0
 
+	innerTP.ForceAttemptHTTP2 = false
+	innerTP.TLSClientConfig.NextProtos = []string{"http/1.1"}
+
 	// use connectionManager to manage the connection
 	// key different is:
 	//   defaultTransport prefer [idle connection, new connection]
