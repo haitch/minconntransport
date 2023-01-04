@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"sync/atomic"
 )
 
 type connMgrErrCode string
@@ -17,28 +18,30 @@ const (
 
 type perRemoteAddrConnMgr struct {
 	connections []*tls.Conn
-	corsor      int
-	count       int
+	corsor      int32
+	count       int32
 }
 
-func newRemoteAddrConnMgr(count int) *perRemoteAddrConnMgr {
+func newRemoteAddrConnMgr(count int32) *perRemoteAddrConnMgr {
 	return &perRemoteAddrConnMgr{
 		connections: make([]*tls.Conn, count),
 		count:       count,
+		corsor:      0,
 	}
 }
 
 func (hm *perRemoteAddrConnMgr) Get() (*tls.Conn, error) {
-	if hm.corsor >= hm.count {
-		hm.corsor = 0
+	var index int32
+	if index = atomic.LoadInt32(&hm.corsor); index >= hm.count {
+		atomic.SwapInt32(&hm.corsor, 0)
+		index = 0
 	}
 
-	conn := hm.connections[hm.corsor]
+	conn := hm.connections[index]
 	if conn != nil {
-		cs := conn.ConnectionState()
-		fmt.Println(cs)
-
-		hm.corsor++
+		// TODO: check conn.ConnectionState()
+		// move the corsor to next slot
+		atomic.AddInt32(&hm.corsor, 1)
 		return conn, nil
 	} else {
 		// not moving the corsor, so later we can set the connection to the same slot
@@ -47,23 +50,26 @@ func (hm *perRemoteAddrConnMgr) Get() (*tls.Conn, error) {
 }
 
 func (hm *perRemoteAddrConnMgr) Set(conn *tls.Conn) {
-	if hm.corsor >= hm.count {
-		hm.corsor = 0
+	var index int32
+	if index = atomic.LoadInt32(&hm.corsor); index >= hm.count {
+		atomic.SwapInt32(&hm.corsor, 0)
+		index = 0
 	}
 
 	fmt.Println(conn.LocalAddr(), conn.RemoteAddr())
 
-	hm.connections[hm.corsor] = conn
-	hm.corsor++
+	hm.connections[index] = conn
+	// move the corsor to next slot
+	atomic.AddInt32(&hm.corsor, 1)
 }
 
 type connectionManager struct {
 	connections map[string]*perRemoteAddrConnMgr // map of host to connections
-	connPerHost int
+	connPerHost int32
 	tlsConfig   *tls.Config
 }
 
-func newConnectionManager(connPerHost int, tlsCfg *tls.Config) *connectionManager {
+func newConnectionManager(connPerHost int32, tlsCfg *tls.Config) *connectionManager {
 	if tlsCfg == nil {
 		tlsCfg = &tls.Config{}
 	}
