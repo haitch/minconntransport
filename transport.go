@@ -1,6 +1,8 @@
 package minconntransport
 
 import (
+	"errors"
+	"net"
 	"net/http"
 )
 
@@ -37,6 +39,11 @@ func NewFromHttpTransport(minConnPerHost int32, inner *http.Transport) http.Roun
 func (rt *roundTripperWithConnectionManager) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := rt.inner.RoundTrip(req)
 	if err != nil {
+		netOpErr := &net.OpError{}
+		if errors.As(err, &netOpErr) {
+			rt.cm.markBrokenConnection(netOpErr)
+		}
+
 		// TODO: if error is connection closed/ server go away, we need to replace the connection.
 		// how to find the connection is a issue, here in transport we don't know which connection is broken.
 		// default library only give DialTLSContext for us to override dail, ideally there should be a callback on close.

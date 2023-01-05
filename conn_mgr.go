@@ -16,15 +16,20 @@ const (
 	connNotAvailable connMgrErrCode = "connNotAvailable"
 )
 
+type connectionMeta struct {
+	conn   *tls.Conn
+	broken bool
+}
+
 type perRemoteAddrConnMgr struct {
-	connections []*tls.Conn
+	connections []*connectionMeta
 	corsor      int32
 	count       int32
 }
 
 func newRemoteAddrConnMgr(count int32) *perRemoteAddrConnMgr {
 	return &perRemoteAddrConnMgr{
-		connections: make([]*tls.Conn, count),
+		connections: make([]*connectionMeta, count),
 		count:       count,
 		corsor:      0,
 	}
@@ -38,11 +43,11 @@ func (hm *perRemoteAddrConnMgr) Get() (*tls.Conn, error) {
 	}
 
 	conn := hm.connections[index]
-	if conn != nil {
+	if conn != nil && !conn.broken {
 		// TODO: check conn.ConnectionState()
 		// move the corsor to next slot
 		atomic.AddInt32(&hm.corsor, 1)
-		return conn, nil
+		return conn.conn, nil
 	} else {
 		// not moving the corsor, so later we can set the connection to the same slot
 		return nil, connNotAvailable
@@ -56,11 +61,21 @@ func (hm *perRemoteAddrConnMgr) Set(conn *tls.Conn) {
 		index = 0
 	}
 
-	fmt.Println(conn.LocalAddr(), conn.RemoteAddr())
+	fmt.Printf("store new connection: %s --> %s \n", conn.LocalAddr(), conn.RemoteAddr())
 
-	hm.connections[index] = conn
+	hm.connections[index] = &connectionMeta{conn: conn, broken: false}
 	// move the corsor to next slot
 	atomic.AddInt32(&hm.corsor, 1)
+}
+
+func (hm *perRemoteAddrConnMgr) markBrokenConnection(err *net.OpError) {
+	// TODO: direct locate with assist of a map?
+	for _, conn := range hm.connections {
+		if conn.conn.RemoteAddr() == err.Addr && conn.conn.LocalAddr() == err.Source {
+			fmt.Printf("found broken connection: %s  --> %s \n", conn.conn.LocalAddr(), conn.conn.RemoteAddr())
+			conn.broken = true
+		}
+	}
 }
 
 type connectionManager struct {
@@ -78,6 +93,13 @@ func newConnectionManager(connPerHost int32, tlsCfg *tls.Config) *connectionMana
 		connections: make(map[string]*perRemoteAddrConnMgr),
 		connPerHost: connPerHost,
 		tlsConfig:   tlsCfg,
+	}
+}
+
+func (cm *connectionManager) markBrokenConnection(err *net.OpError) {
+	// TODO: direct locate instead of loop through all
+	for _, hm := range cm.connections {
+		hm.markBrokenConnection(err)
 	}
 }
 
