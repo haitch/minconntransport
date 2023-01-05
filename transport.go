@@ -4,50 +4,70 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strings"
 )
 
 type roundTripperWithConnectionManager struct {
-	inner *http.Transport
-	cm    *connectionManager
+	managed      *http.Transport
+	original     *http.Transport
+	cm           *connectionManager
+	perHostLimit map[string]int32
 }
 
-func New() http.RoundTripper {
-	return NewFromHttpTransport(5, http.DefaultTransport.(*http.Transport))
-}
-
-func NewFromHttpTransport(minConnPerHost int32, inner *http.Transport) http.RoundTripper {
-	innerTP := inner.Clone()
+func NewFromHttpTransport(inner *http.Transport, hostLimit map[string]int32) http.RoundTripper {
+	managedTP := inner.Clone()
 
 	// disable connection pooling from http package
-	innerTP.MaxConnsPerHost = 0
+	managedTP.MaxConnsPerHost = 0
 
-	innerTP.ForceAttemptHTTP2 = false
-	innerTP.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	managedTP.ForceAttemptHTTP2 = false
+	managedTP.TLSClientConfig.NextProtos = []string{"http/1.1"}
 
 	// use connectionManager to manage the connection
 	// key different is:
 	//   defaultTransport prefer [idle connection, new connection]
 	//   minConnTransport prefer [new connection, pooled connection] til it reach to limit, then it would do round-robin on all pooled connection
-	cm := newConnectionManager(minConnPerHost, innerTP.TLSClientConfig)
-	innerTP.DialTLSContext = cm.DialTLSContext
+	cm := newConnectionManager(managedTP.TLSClientConfig, sanitizeHostLimit(hostLimit))
+	managedTP.DialTLSContext = cm.DialTLSContext
 	return &roundTripperWithConnectionManager{
-		inner: innerTP,
-		cm:    cm,
+		managed:  managedTP,
+		original: inner,
+		cm:       cm,
 	}
 }
 
 func (rt *roundTripperWithConnectionManager) RoundTrip(req *http.Request) (*http.Response, error) {
-	resp, err := rt.inner.RoundTrip(req)
+	// if host is not in the hostLimit, use default transport
+	if _, ok := rt.cm.hostLimit[sanitizeHostName(req.Host)]; !ok {
+		return rt.original.RoundTrip(req)
+	}
+
+	resp, err := rt.managed.RoundTrip(req)
 	if err != nil {
+		// if it's a network error, mark the connection as broken
+		// not handling retry here, this pkg is only for connection management, at least for now.
 		netOpErr := &net.OpError{}
 		if errors.As(err, &netOpErr) {
 			rt.cm.markBrokenConnection(netOpErr)
 		}
-
-		// TODO: if error is connection closed/ server go away, we need to replace the connection.
-		// how to find the connection is a issue, here in transport we don't know which connection is broken.
-		// default library only give DialTLSContext for us to override dail, ideally there should be a callback on close.
 		return nil, err
 	}
 	return resp, nil
+}
+
+func sanitizeHostLimit(hostLimit map[string]int32) map[string]int32 {
+	hostLimitCopy := make(map[string]int32)
+	for k, v := range hostLimit {
+		if v >= 0 {
+			hostLimitCopy[sanitizeHostName(k)] = v
+		}
+	}
+	return hostLimitCopy
+}
+
+func sanitizeHostName(host string) string {
+	if strings.Contains(host, ":") {
+		return host
+	}
+	return strings.ToLower(host) + ":443"
 }

@@ -80,18 +80,18 @@ func (hm *perRemoteAddrConnMgr) markBrokenConnection(err *net.OpError) {
 
 type connectionManager struct {
 	connections map[string]*perRemoteAddrConnMgr // map of host to connections
-	connPerHost int32
+	hostLimit   map[string]int32
 	tlsConfig   *tls.Config
 }
 
-func newConnectionManager(connPerHost int32, tlsCfg *tls.Config) *connectionManager {
+func newConnectionManager(tlsCfg *tls.Config, hostLimit map[string]int32) *connectionManager {
 	if tlsCfg == nil {
 		tlsCfg = &tls.Config{}
 	}
 
 	return &connectionManager{
 		connections: make(map[string]*perRemoteAddrConnMgr),
-		connPerHost: connPerHost,
+		hostLimit:   hostLimit,
 		tlsConfig:   tlsCfg,
 	}
 }
@@ -107,7 +107,7 @@ func (cm *connectionManager) DialTLSContext(ctx context.Context, network, addr s
 	var hm *perRemoteAddrConnMgr
 	var ok bool
 	if hm, ok = cm.connections[addr]; !ok {
-		hm = newRemoteAddrConnMgr(cm.connPerHost)
+		hm = newRemoteAddrConnMgr(cm.hostLimit[addr])
 		cm.connections[addr] = hm
 	}
 
